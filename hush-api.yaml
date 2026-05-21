@@ -296,6 +296,19 @@ paths:
   /v1/devices/{id}/cards:
     parameters:
       - $ref: "#/components/parameters/DeviceId"
+    get:
+      operationId: listDeviceCards
+      tags: [cards]
+      summary: List card bindings on a device.
+      responses:
+        "200":
+          description: Bindings (unpaginated; capped server-side).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardBindingList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
     post:
       operationId: bindCard
       tags: [cards]
@@ -837,3 +850,11 @@ components:
         audioId:
           type: string
           format: uuid
+
+    CardBindingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CardBinding" }

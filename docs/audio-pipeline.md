@@ -35,19 +35,27 @@ client                       backend                       object storage
 
 ## Transcoding
 
-> TODO(phase-2): A background worker picks up finalized items from a queue (Postgres `LISTEN/NOTIFY` initially, swap to Redis or SQS if needed).
->
-> Encoding target: **MP3 128 kbps CBR mono 44.1 kHz**.
-> Tool: `ffmpeg` invocation in `hush-backend/api/src/transcode/`.
->
-> On success:
-> - Transcoded file written to `audio/<audioId>.mp3` in object storage.
-> - SHA-256 computed and stored in the DB.
-> - `Audio.state` flips to `ready`.
->
-> On failure:
-> - `Audio.state` flips to `failed`.
-> - User receives a notification (push + dashboard).
+A background worker picks up finalized items from an **in-process queue** inside the API process (concurrency capped by `TRANSCODE_CONCURRENCY`, default 2). On API boot, any `audios.state='processing'` row is re-enqueued — restart recovery is automatic. Move to a separate process / Redis queue when concurrent demand exceeds the in-process cap or when horizontal scale is needed.
+
+Encoding target: **MP3 128 kbps CBR mono 44.1 kHz**.
+Tool: `ffmpeg` invocation in `hush-backend/api/src/transcode/`.
+
+Object storage layout (same bucket, two prefixes):
+
+- `uploads/<audioId>` — raw client upload (kept until transcode completes; lifecycle expiry 7 days catches abandoned uploads).
+- `audio/<audioId>.mp3` — transcoded artifact.
+
+On success:
+
+- Transcoded file written to `audio/<audioId>.mp3`.
+- SHA-256, size and duration written to the DB.
+- `Audio.state` flips to `ready`.
+- Raw upload at `uploads/<audioId>` is deleted.
+
+On failure:
+
+- `Audio.state` flips to `failed` with `failure_reason`.
+- Raw upload retained for inspection; the user can retry by hitting `POST /v1/audio/{id}/finalize` again (phase 4 dashboard UX).
 
 ## Distribution to devices
 
