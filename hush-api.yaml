@@ -1,0 +1,839 @@
+openapi: 3.1.0
+info:
+  title: Hush API
+  version: 0.1.0
+  summary: API contract for Hush devices, users, dashboard and mobile app.
+  description: |
+    Hush is an open-source RFID-activated audio device for children
+    (see https://open-hush.com). This document is the **single source of
+    truth** for the HTTP API used by:
+
+      - the firmware running on the XIAO ESP32-S3 (HMAC-authenticated),
+      - the mobile app and the web dashboard (JWT-authenticated),
+      - the backend that orchestrates devices, audio and users.
+
+    Any consumer that hand-rolls types diverging from this spec is broken.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: Hush
+    url: https://open-hush.com
+
+servers:
+  - url: https://api.open-hush.com
+    description: Production
+  - url: https://staging-api.open-hush.com
+    description: Staging
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: meta
+    description: Health, version and other meta endpoints.
+  - name: device
+    description: Endpoints called by the firmware. HMAC-authenticated.
+  - name: users
+    description: User registration, login and profile.
+  - name: devices
+    description: Device management from a user perspective (claim, list, configure).
+  - name: audio
+    description: Audio item upload, transcoding and metadata.
+  - name: cards
+    description: Binding of RFID card UIDs to audio items on a device.
+
+security:
+  - userJwt: []
+
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      tags: [meta]
+      summary: Liveness probe.
+      security: []
+      responses:
+        "200":
+          description: Service is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: Service is degraded or unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/device/register:
+    post:
+      operationId: registerDevice
+      tags: [device]
+      summary: First-boot registration of a device.
+      description: |
+        Called once by the firmware right after WiFi credentials have been
+        provisioned via BLE. The device proves possession of its baked-in
+        per-device secret via HMAC and receives a device-scoped token plus
+        the initial sync payload.
+      security:
+        - deviceHmac: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceRegisterRequest"
+      responses:
+        "200":
+          description: Device registered (idempotent).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceRegisterResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/device/sync:
+    get:
+      operationId: syncDevice
+      tags: [device]
+      summary: Pull configuration, card bindings and audio manifest.
+      description: |
+        Devices poll this endpoint roughly every 10 minutes (configurable from
+        the dashboard). The response is the **complete current state**: cards,
+        audio items with presigned URLs, power-saving thresholds and feature
+        flags. Clients diff against their cached version.
+      security:
+        - deviceHmac: []
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: ISO-8601 timestamp of the last successful sync. If omitted, a full snapshot is returned.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Current sync payload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceSyncResponse"
+        "304":
+          description: Nothing changed since `since`.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/device/events:
+    post:
+      operationId: postDeviceEvents
+      tags: [device]
+      summary: Push a batch of events from the device.
+      description: |
+        Devices buffer events (card scans, button presses, errors) locally and
+        flush them in batches. The endpoint is idempotent on `eventId`.
+      security:
+        - deviceHmac: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceEventsRequest"
+      responses:
+        "202":
+          description: Events accepted for processing.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/users/register:
+    post:
+      operationId: registerUser
+      tags: [users]
+      summary: Create a new user account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserRegisterRequest"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokens"
+        "409":
+          description: Email already in use.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/users/login:
+    post:
+      operationId: loginUser
+      tags: [users]
+      summary: Exchange email + password for an access/refresh token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserLoginRequest"
+      responses:
+        "200":
+          description: Authentication successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokens"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users/refresh:
+    post:
+      operationId: refreshTokens
+      tags: [users]
+      summary: Trade a refresh token for a new access/refresh pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokens"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users/me:
+    get:
+      operationId: getMe
+      tags: [users]
+      summary: Get the authenticated user's profile.
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/devices:
+    get:
+      operationId: listDevices
+      tags: [devices]
+      summary: List devices owned by the authenticated user.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Paginated device list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    get:
+      operationId: getDevice
+      tags: [devices]
+      summary: Get a single device.
+      responses:
+        "200":
+          description: Device.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/devices/{id}/claim:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    post:
+      operationId: claimDevice
+      tags: [devices]
+      summary: Claim an unclaimed device.
+      description: |
+        After BLE pairing the user owns the device. The claim step transfers
+        ownership in the backend. The body carries a short-lived claim code
+        displayed on the dashboard / printed on the box.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceClaimRequest"
+      responses:
+        "200":
+          description: Device claimed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Device already claimed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/devices/{id}/cards:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    post:
+      operationId: bindCard
+      tags: [cards]
+      summary: Bind an RFID card UID to an audio item on a device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CardBindingRequest"
+      responses:
+        "200":
+          description: Card binding upserted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardBinding"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/devices/{id}/cards/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+      - name: uid
+        in: path
+        required: true
+        description: RFID UID in lowercase hex (no separators).
+        schema:
+          type: string
+          pattern: "^[0-9a-f]{8,20}$"
+    delete:
+      operationId: unbindCard
+      tags: [cards]
+      summary: Remove a card binding from a device.
+      responses:
+        "204":
+          description: Binding removed.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/audio:
+    get:
+      operationId: listAudio
+      tags: [audio]
+      summary: List audio items owned by the authenticated user.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Paginated list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioList"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createAudio
+      tags: [audio]
+      summary: Create an audio item and obtain a presigned upload URL.
+      description: |
+        The backend never proxies audio bytes. The client uploads the raw file
+        directly to object storage using the returned presigned URL, then
+        calls `POST /v1/audio/{id}/finalize` to trigger transcoding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AudioCreateRequest"
+      responses:
+        "201":
+          description: Audio item created with upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioCreateResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/audio/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAudio
+      tags: [audio]
+      summary: Get an audio item.
+      responses:
+        "200":
+          description: Audio item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Audio"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/audio/{id}/finalize:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: finalizeAudio
+      tags: [audio]
+      summary: Notify the backend that the raw upload is complete.
+      description: |
+        Triggers ffmpeg transcoding (MP3 128 kbps CBR mono 44.1 kHz). The item
+        moves to `state: processing` until the worker is done; consumers
+        should poll `GET /v1/audio/{id}` or rely on the next device sync.
+      responses:
+        "202":
+          description: Finalization accepted; transcoding queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Audio"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Audio already finalized.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    deviceHmac:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        Device-scoped HMAC-SHA256 signature. The header value is
+        `HMAC keyId=<device-id>,signature=<hex>,ts=<unix-seconds>`. See
+        [`docs/auth.md`](./docs/auth.md) for the canonicalization rules.
+    userJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived (15 min) access token. Pair with `/v1/users/refresh` to
+        rotate. See [`docs/auth.md`](./docs/auth.md).
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque pagination cursor returned by a previous response.
+      schema:
+        type: string
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      description: Device identifier (UUID).
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid authentication.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: Request body failed validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+          description: SemVer of the backend build.
+        commit:
+          type: string
+          description: Git commit short SHA.
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code (snake_case, stable).
+          examples: [invalid_credentials, device_already_claimed, validation_failed]
+        message:
+          type: string
+          description: Human-readable explanation.
+        details:
+          type: object
+          additionalProperties: true
+
+    AuthTokens:
+      type: object
+      required: [accessToken, refreshToken, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: JWT access token. Short-lived (15 min).
+        refreshToken:
+          type: string
+          description: Refresh token. Single-use; rotated on every refresh.
+        expiresIn:
+          type: integer
+          description: Access-token TTL in seconds.
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    UserRegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 12
+        displayName:
+          type: string
+
+    UserLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    User:
+      type: object
+      required: [id, email, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Device:
+      type: object
+      required: [id, serial, state, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        serial:
+          type: string
+          description: Per-unit serial printed on the device.
+        ownerId:
+          type: string
+          format: uuid
+          description: User who claimed the device. Null while unclaimed.
+        name:
+          type: string
+          description: User-chosen device name (e.g. "Marta's box").
+        state:
+          type: string
+          enum: [unclaimed, claimed, retired]
+        firmwareVersion:
+          type: string
+        lastSeenAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    DeviceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Device" }
+        nextCursor:
+          type: string
+
+    DeviceRegisterRequest:
+      type: object
+      required: [serial, firmwareVersion]
+      properties:
+        serial:
+          type: string
+        firmwareVersion:
+          type: string
+        macAddress:
+          type: string
+          description: BLE MAC address, lowercase hex with colons.
+          pattern: "^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
+
+    DeviceRegisterResponse:
+      type: object
+      required: [device]
+      properties:
+        device: { $ref: "#/components/schemas/Device" }
+        claimCode:
+          type: string
+          description: Short-lived code shown to the user during pairing.
+
+    DeviceClaimRequest:
+      type: object
+      required: [claimCode]
+      properties:
+        claimCode:
+          type: string
+        name:
+          type: string
+
+    DeviceSyncResponse:
+      type: object
+      required: [serverTime, config, cards, audio]
+      properties:
+        serverTime:
+          type: string
+          format: date-time
+        config:
+          $ref: "#/components/schemas/DeviceConfig"
+        cards:
+          type: array
+          items: { $ref: "#/components/schemas/CardBinding" }
+        audio:
+          type: array
+          items: { $ref: "#/components/schemas/AudioSyncEntry" }
+
+    DeviceConfig:
+      type: object
+      required: [lightSleepAfterSec, deepSleepAfterSec, volumeMax]
+      properties:
+        lightSleepAfterSec:
+          type: integer
+          minimum: 5
+          description: Seconds of idle before LIGHT_SLEEP. Default 30.
+        deepSleepAfterSec:
+          type: integer
+          minimum: 60
+          description: Seconds of idle before DEEP_SLEEP. Default 300.
+        volumeMax:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Hard ceiling for the volume encoder.
+        ledBrightness:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    DeviceEventsRequest:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/DeviceEvent" }
+
+    DeviceEvent:
+      type: object
+      required: [eventId, ts, type]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Client-generated UUID; used for idempotency.
+        ts:
+          type: string
+          format: date-time
+        type:
+          type: string
+          enum:
+            - card_scanned
+            - card_unknown
+            - playback_started
+            - playback_finished
+            - button_pressed
+            - low_battery
+            - error
+        payload:
+          type: object
+          additionalProperties: true
+          description: Free-form per-event data. Shapes will be tightened in phase 2.
+
+    Audio:
+      type: object
+      required: [id, title, state, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        durationMs:
+          type: integer
+          minimum: 0
+        state:
+          type: string
+          enum: [uploading, processing, ready, failed]
+        sha256:
+          type: string
+          description: Hex SHA-256 of the transcoded MP3.
+        sizeBytes:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+
+    AudioCreateRequest:
+      type: object
+      required: [title, sourceContentType]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        sourceContentType:
+          type: string
+          description: MIME type of the source file the client will upload.
+          examples: ["audio/mpeg", "audio/wav", "audio/x-m4a", "audio/ogg"]
+
+    AudioCreateResponse:
+      type: object
+      required: [audio, upload]
+      properties:
+        audio: { $ref: "#/components/schemas/Audio" }
+        upload:
+          type: object
+          required: [url, method, expiresAt]
+          properties:
+            url:
+              type: string
+              format: uri
+              description: Presigned URL for the raw upload.
+            method:
+              type: string
+              enum: [PUT]
+            expiresAt:
+              type: string
+              format: date-time
+            headers:
+              type: object
+              additionalProperties:
+                type: string
+              description: Headers the client must include verbatim.
+
+    AudioList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Audio" }
+        nextCursor:
+          type: string
+
+    AudioSyncEntry:
+      type: object
+      required: [id, sha256, downloadUrl, expiresAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sha256:
+          type: string
+        sizeBytes:
+          type: integer
+        downloadUrl:
+          type: string
+          format: uri
+          description: Presigned GET URL valid until `expiresAt`.
+        expiresAt:
+          type: string
+          format: date-time
+
+    CardBinding:
+      type: object
+      required: [uid, audioId]
+      properties:
+        uid:
+          type: string
+          pattern: "^[0-9a-f]{8,20}$"
+          description: RFID UID, lowercase hex, no separators.
+        audioId:
+          type: string
+          format: uuid
+        boundAt:
+          type: string
+          format: date-time
+
+    CardBindingRequest:
+      type: object
+      required: [uid, audioId]
+      properties:
+        uid:
+          type: string
+          pattern: "^[0-9a-f]{8,20}$"
+        audioId:
+          type: string
+          format: uuid

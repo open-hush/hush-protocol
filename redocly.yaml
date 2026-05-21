@@ -1,0 +1,9 @@
+extends:
+  - recommended
+
+# Per-rule overrides for the Hush spec.
+rules:
+  # `http://localhost:8080` is intentionally listed as a `servers` entry so the
+  # generated docs work out-of-the-box for contributors running the backend
+  # locally. The recommended ruleset flags this; we knowingly accept it.
+  no-server-example.com: off
