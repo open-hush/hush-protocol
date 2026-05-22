@@ -67,6 +67,49 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /v1/ready:
+    get:
+      operationId: getReadiness
+      tags: [meta]
+      summary: Readiness probe with per-dependency checks.
+      description: |
+        Liveness (`/v1/health`) only proves the process answered. Readiness
+        also checks that every downstream the API actually depends on (the
+        database, object storage) is reachable. Orchestrators should use
+        this endpoint to decide whether the instance should receive traffic.
+      security: []
+      responses:
+        "200":
+          description: Every dependency is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ready"
+              examples:
+                ok:
+                  summary: All checks pass.
+                  value:
+                    status: ok
+                    checks:
+                      database: { status: ok, latencyMs: 3 }
+                      objectStorage: { status: ok, latencyMs: 12 }
+        "503":
+          description: At least one dependency is unhealthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ready"
+              examples:
+                degraded:
+                  summary: Object storage is down.
+                  value:
+                    status: degraded
+                    checks:
+                      database: { status: ok, latencyMs: 4 }
+                      objectStorage:
+                        status: error
+                        error: "connection refused"
+
   /v1/device/register:
     post:
       operationId: registerDevice
@@ -561,6 +604,35 @@ components:
         commit:
           type: string
           description: Git commit short SHA.
+
+    Ready:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: Aggregate readiness. `degraded` whenever any check is not `ok`.
+        checks:
+          type: object
+          description: Per-dependency check results, keyed by check name (`database`, `objectStorage`, …).
+          additionalProperties:
+            $ref: "#/components/schemas/ReadyCheck"
+
+    ReadyCheck:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, error, timeout]
+        latencyMs:
+          type: integer
+          minimum: 0
+          description: Round-trip latency of the probe. Present on success.
+        error:
+          type: string
+          description: Short failure description. Present when `status` is not `ok`.
 
     Error:
       type: object
