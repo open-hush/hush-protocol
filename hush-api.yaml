@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Hush API
-  version: 0.1.0
+  version: 0.3.0
   summary: API contract for Hush devices, users, dashboard and mobile app.
   description: |
     Hush is an open-source RFID-activated audio device for children
@@ -13,6 +13,54 @@ info:
       - the backend that orchestrates devices, audio and users.
 
     Any consumer that hand-rolls types diverging from this spec is broken.
+
+    ## Rate limiting
+
+    Rate-limited routes carry three response headers on every response, success
+    or failure:
+
+      - `X-RateLimit-Limit` — the cap for the current window.
+      - `X-RateLimit-Remaining` — requests still allowed in this window.
+      - `X-RateLimit-Reset` — Unix timestamp (seconds, UTC) when the window
+        rolls over.
+
+    When the quota is exhausted the server returns `429 Too Many Requests`
+    with the canonical `Error` body and a `Retry-After` header (seconds).
+    Clients **must** honour `Retry-After`; exponential back-off is encouraged
+    but the floor is whatever the server asks for.
+
+    Limits are per IP for unauthenticated routes (`/v1/users/{login,refresh}`),
+    per device for `/v1/device/*` and `/v1/firmware/*`, and per user for all
+    other authenticated routes (including `/v1/users/register`). Concrete values are operational and may
+    change without a spec bump — read them from the headers, do not hard-code.
+
+    ## Webhook delivery
+
+    Server-to-consumer webhooks (`device.online`, `audio.finalized`) are
+    POSTed to a URL the user has registered for their account. Subscription
+    management is out of scope for this version of the spec; this section
+    describes only the wire shape of the POST itself.
+
+    Every webhook request carries three headers:
+
+      - `Hush-Webhook-Id` — a UUID v4 unique to this delivery attempt. Use it
+        for idempotent processing on the consumer side; the same `id` may
+        arrive more than once if the backend retries.
+      - `Hush-Webhook-Type` — the event type (e.g. `device.online`). Always
+        matches the `type` field inside the body, so consumers can route on
+        the header without parsing JSON.
+      - `Hush-Webhook-Signature` — an HMAC-SHA256 signature in the format
+        `t=<unix-seconds>,v1=<lowercase-hex>`. The signed string is
+        `<t> + "." + <raw-request-body>`; the key is the per-user webhook
+        secret returned at subscription time. Consumers **must** reject
+        requests with skew greater than 5 minutes and constant-time-compare
+        the signature.
+
+    Delivery is at-least-once. The backend retries on any non-2xx with
+    exponential back-off (1s, 5s, 25s, 2min, 10min, 1h, 6h, 24h) for up to 24
+    hours. A `410 Gone` response disables the subscription immediately and
+    stops retries. Webhook bodies are always JSON; never assume an order in
+    the headers.
   license:
     name: MIT
     identifier: MIT
@@ -43,6 +91,8 @@ tags:
     description: Binding of RFID card UIDs to audio items on a device.
   - name: firmware
     description: Firmware OTA distribution.
+  - name: webhooks
+    description: Server-to-consumer notifications. Defined under top-level `webhooks:`.
 
 security:
   - userJwt: []
@@ -137,6 +187,7 @@ paths:
                 $ref: "#/components/schemas/DeviceRegisterResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/device/sync:
     get:
@@ -190,13 +241,18 @@ paths:
           description: Events accepted for processing.
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/users/register:
     post:
       operationId: registerUser
       tags: [users]
       summary: Create a new user account.
-      security: []
+      description: |
+        Registration is not public: it requires a valid user access token. On a
+        fresh install the backend seeds the first account at boot (see
+        `BOOTSTRAP_ADMIN_*`), and that account creates any further users from
+        the dashboard. There are no roles — every user may create others.
       requestBody:
         required: true
         content:
@@ -205,17 +261,28 @@ paths:
               $ref: "#/components/schemas/UserRegisterRequest"
       responses:
         "201":
-          description: User created.
+          description: |
+            User created. Returns the new user's profile — not tokens: the
+            caller stays authenticated as themselves. The new user signs in via
+            `/v1/users/login` with the password set here.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthTokens"
+                $ref: "#/components/schemas/User"
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "409":
           description: Email already in use.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                emailTaken:
+                  summary: An account with that email already exists.
+                  value:
+                    code: email_taken
+                    message: An account with that email already exists.
         "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/users/login:
     post:
@@ -237,6 +304,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/AuthTokens"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/users/refresh:
     post:
@@ -258,6 +326,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/AuthTokens"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/users/me:
     get:
@@ -272,6 +341,49 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/users/me/password:
+    patch:
+      operationId: changePassword
+      tags: [users]
+      summary: Change the authenticated user's password.
+      description: |
+        Verifies `currentPassword`, then sets `newPassword`. All of the user's
+        refresh tokens are revoked (logging out every other session) and a fresh
+        access/refresh pair is issued for the caller, so the current session
+        survives the change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+            examples:
+              rotate:
+                summary: Replace the initial bootstrap password.
+                value:
+                  currentPassword: the-one-time-bootstrap-password
+                  newPassword: a-much-longer-passphrase-i-chose
+      responses:
+        "200":
+          description: Password changed; a fresh token pair is issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokens"
+        "401":
+          description: Missing token or `currentPassword` did not match.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                wrongPassword:
+                  summary: The supplied current password is incorrect.
+                  value:
+                    code: invalid_credentials
+                    message: Current password is incorrect.
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/devices:
     get:
@@ -337,6 +449,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                alreadyClaimed:
+                  summary: Device is owned by another account.
+                  value:
+                    code: device_already_claimed
+                    message: This device is already owned by another account.
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/devices/{id}/cards:
     parameters:
@@ -373,6 +492,8 @@ paths:
                 $ref: "#/components/schemas/CardBinding"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/devices/{id}/cards/{uid}:
     parameters:
@@ -432,6 +553,7 @@ paths:
                 $ref: "#/components/schemas/AudioCreateResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/Unprocessable" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /v1/audio/{id}:
     parameters:
@@ -485,6 +607,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                alreadyFinalized:
+                  summary: Item is already past the upload state.
+                  value:
+                    code: audio_already_finalized
+                    message: This audio item is already past the upload state.
 
   /v1/firmware/latest:
     get:
@@ -537,6 +665,71 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                noFirmware:
+                  summary: No release exists for the requested hardware revision.
+                  value:
+                    code: no_firmware
+                    message: No firmware has been published for hardware revision r0.
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+webhooks:
+  deviceOnline:
+    post:
+      operationId: deviceOnlineWebhook
+      tags: [webhooks]
+      summary: A device transitioned to online.
+      description: |
+        Fired when the backend receives traffic from a device after at least
+        5 minutes of silence — i.e. the device just came back online from a
+        deep-sleep or network outage. The webhook is **not** fired on every
+        heartbeat; only on edge transitions offline → online.
+
+        See [Webhook delivery](#section/Webhook-delivery) in the description
+        for signature verification and retry semantics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookEnvelopeDeviceOnline"
+      parameters:
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+        - $ref: "#/components/parameters/WebhookIdHeader"
+        - $ref: "#/components/parameters/WebhookTypeHeader"
+      responses:
+        "2XX":
+          description: |
+            Any 2xx status acknowledges receipt. The body is ignored.
+        "410":
+          description: |
+            The consumer no longer wants this webhook. The backend will
+            disable the subscription and stop retrying.
+
+  audioFinalized:
+    post:
+      operationId: audioFinalizedWebhook
+      tags: [webhooks]
+      summary: Audio transcoding completed.
+      description: |
+        Fired when an audio item transitions out of `processing` — either to
+        `ready` (transcode succeeded) or `failed` (transcode errored out).
+        Use `data.audio.state` to disambiguate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookEnvelopeAudioFinalized"
+      parameters:
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+        - $ref: "#/components/parameters/WebhookIdHeader"
+        - $ref: "#/components/parameters/WebhookTypeHeader"
+      responses:
+        "2XX":
+          description: Acknowledged.
+        "410":
+          description: Subscription is gone; stop retrying.
 
 components:
   securitySchemes:
@@ -572,6 +765,72 @@ components:
       schema:
         type: string
         format: uuid
+    WebhookSignatureHeader:
+      name: Hush-Webhook-Signature
+      in: header
+      required: true
+      description: |
+        HMAC-SHA256 signature of `<t>.<raw-body>` using the per-user webhook
+        secret. Format `t=<unix-seconds>,v1=<lowercase-hex>`. Consumers must
+        reject `|now-t| > 300s` and use a constant-time compare.
+      schema:
+        type: string
+        pattern: "^t=[0-9]+,v1=[0-9a-f]{64}$"
+        examples:
+          - "t=1748892600,v1=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    WebhookIdHeader:
+      name: Hush-Webhook-Id
+      in: header
+      required: true
+      description: |
+        UUID v4 unique to this delivery attempt. Use it for idempotent
+        processing; the same id may arrive more than once on retry.
+      schema:
+        type: string
+        format: uuid
+    WebhookTypeHeader:
+      name: Hush-Webhook-Type
+      in: header
+      required: true
+      description: |
+        The event type. Always equal to the `type` field of the body.
+      schema:
+        type: string
+        enum: [device.online, audio.finalized]
+
+  headers:
+    RateLimitLimit:
+      description: |
+        Maximum number of requests the client may issue inside the current
+        rate-limit window. Constant within a window.
+      schema:
+        type: integer
+        minimum: 1
+      example: 60
+    RateLimitRemaining:
+      description: |
+        Requests still allowed in the current window. Decreases on each accepted
+        request; resets to `X-RateLimit-Limit` when the window rolls over.
+      schema:
+        type: integer
+        minimum: 0
+      example: 42
+    RateLimitReset:
+      description: |
+        Unix timestamp (seconds since epoch, UTC) at which the current window
+        rolls over and the quota resets.
+      schema:
+        type: integer
+        minimum: 0
+      example: 1748892900
+    RetryAfter:
+      description: |
+        Seconds the client should wait before retrying. Always present on
+        `429 Too Many Requests`.
+      schema:
+        type: integer
+        minimum: 0
+      example: 30
 
   responses:
     Unauthorized:
@@ -579,16 +838,84 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            missing:
+              summary: No `Authorization` header.
+              value:
+                code: unauthorized
+                message: Missing bearer token.
+            invalidSignature:
+              summary: HMAC signature did not verify.
+              value:
+                code: invalid_signature
+                message: HMAC verification failed.
+            expired:
+              summary: Token / HMAC timestamp is outside the accepted window.
+              value:
+                code: expired_token
+                message: Access token has expired; refresh required.
     NotFound:
       description: Resource not found.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            device:
+              summary: Device unknown to the authenticated user.
+              value:
+                code: device_not_found
+                message: No device with that id is visible to this user.
+            audio:
+              summary: Audio item unknown to the authenticated user.
+              value:
+                code: audio_not_found
+                message: No audio item with that id is visible to this user.
+            binding:
+              summary: No binding for the given UID on the device.
+              value:
+                code: binding_not_found
+                message: No binding for that UID on this device.
     Unprocessable:
       description: Request body failed validation.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            missingField:
+              summary: A required field is missing.
+              value:
+                code: validation_failed
+                message: sourceContentType is required.
+                details:
+                  field: sourceContentType
+            badEnum:
+              summary: A field carries a value outside the allowed enum.
+              value:
+                code: validation_failed
+                message: events[1].type must be one of card_scanned, card_unknown, playback_started, playback_finished, button_pressed, low_battery, error.
+                details:
+                  field: events[1].type
+    TooManyRequests:
+      description: |
+        The client has exceeded the rate limit for this route. The response
+        always carries a `Retry-After` header (seconds) and the standard
+        `X-RateLimit-*` triplet so clients can self-throttle.
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+        X-RateLimit-Limit: { $ref: "#/components/headers/RateLimitLimit" }
+        X-RateLimit-Remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        X-RateLimit-Reset: { $ref: "#/components/headers/RateLimitReset" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            login:
+              summary: Login attempts exceeded.
+              value:
+                code: rate_limited
+                message: Too many login attempts. Try again in 30 seconds.
+                details:
+                  retryAfterSec: 30
 
   schemas:
     Health:
@@ -694,6 +1021,18 @@ components:
         password:
           type: string
           format: password
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          format: password
+        newPassword:
+          type: string
+          format: password
+          minLength: 12
 
     User:
       type: object
@@ -830,6 +1169,37 @@ components:
           items: { $ref: "#/components/schemas/DeviceEvent" }
 
     DeviceEvent:
+      description: |
+        A single event emitted by the firmware. The wire shape is a
+        discriminated union keyed by `type`; consumers should pattern-match on
+        it (codegen libraries surface this as a sum type / tagged enum).
+
+        `eventId` is a client-generated UUID used for idempotency; the backend
+        deduplicates on `(deviceId, eventId)`.
+      oneOf:
+        - $ref: "#/components/schemas/DeviceEventCardScanned"
+        - $ref: "#/components/schemas/DeviceEventCardUnknown"
+        - $ref: "#/components/schemas/DeviceEventPlaybackStarted"
+        - $ref: "#/components/schemas/DeviceEventPlaybackFinished"
+        - $ref: "#/components/schemas/DeviceEventButtonPressed"
+        - $ref: "#/components/schemas/DeviceEventVolumeChanged"
+        - $ref: "#/components/schemas/DeviceEventLowBattery"
+        - $ref: "#/components/schemas/DeviceEventWifiSignal"
+        - $ref: "#/components/schemas/DeviceEventError"
+      discriminator:
+        propertyName: type
+        mapping:
+          card_scanned:      "#/components/schemas/DeviceEventCardScanned"
+          card_unknown:      "#/components/schemas/DeviceEventCardUnknown"
+          playback_started:  "#/components/schemas/DeviceEventPlaybackStarted"
+          playback_finished: "#/components/schemas/DeviceEventPlaybackFinished"
+          button_pressed:    "#/components/schemas/DeviceEventButtonPressed"
+          volume_changed:    "#/components/schemas/DeviceEventVolumeChanged"
+          low_battery:       "#/components/schemas/DeviceEventLowBattery"
+          wifi_signal:       "#/components/schemas/DeviceEventWifiSignal"
+          error:             "#/components/schemas/DeviceEventError"
+
+    DeviceEventBase:
       type: object
       required: [eventId, ts, type]
       properties:
@@ -842,18 +1212,173 @@ components:
           format: date-time
         type:
           type: string
-          enum:
-            - card_scanned
-            - card_unknown
-            - playback_started
-            - playback_finished
-            - button_pressed
-            - low_battery
-            - error
-        payload:
-          type: object
-          additionalProperties: true
-          description: Free-form per-event data. Shapes will be tightened in phase 2.
+
+    DeviceEventCardScanned:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: card_scanned }
+            payload:
+              type: object
+              required: [uid]
+              properties:
+                uid:
+                  type: string
+                  pattern: "^[0-9a-f]{8,20}$"
+                  description: RFID UID, lowercase hex, no separators.
+
+    DeviceEventCardUnknown:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: card_unknown }
+            payload:
+              type: object
+              required: [uid]
+              properties:
+                uid:
+                  type: string
+                  pattern: "^[0-9a-f]{8,20}$"
+
+    DeviceEventPlaybackStarted:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: playback_started }
+            payload:
+              type: object
+              required: [audioId]
+              properties:
+                audioId:
+                  type: string
+                  format: uuid
+
+    DeviceEventPlaybackFinished:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: playback_finished }
+            payload:
+              type: object
+              required: [audioId, reason]
+              properties:
+                audioId:
+                  type: string
+                  format: uuid
+                reason:
+                  type: string
+                  enum: [completed, interrupted, error]
+                  description: |
+                    `completed` — playback reached the end.
+                    `interrupted` — a new card was scanned mid-playback, or the user pressed pause.
+                    `error` — the decoder failed; a paired `error` event follows.
+                positionMs:
+                  type: integer
+                  minimum: 0
+                  description: Position at which playback ended. Useful when `reason` is `interrupted`.
+
+    DeviceEventButtonPressed:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: button_pressed }
+            payload:
+              type: object
+              required: [button]
+              properties:
+                button:
+                  type: string
+                  enum: [reset, pairing, encoder]
+                  description: Which physical control fired the event.
+                durationMs:
+                  type: integer
+                  minimum: 0
+                  description: How long the button was held. Omitted for momentary taps.
+
+    DeviceEventVolumeChanged:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: volume_changed }
+            payload:
+              type: object
+              required: [volume]
+              properties:
+                volume:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: Volume level after the change.
+
+    DeviceEventLowBattery:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: low_battery }
+            payload:
+              type: object
+              required: [batteryPercent]
+              properties:
+                batteryPercent:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                voltageMv:
+                  type: integer
+                  minimum: 0
+                  description: Pack voltage in millivolts. Optional, useful for debugging.
+
+    DeviceEventWifiSignal:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: wifi_signal }
+            payload:
+              type: object
+              required: [rssi]
+              properties:
+                rssi:
+                  type: integer
+                  minimum: -120
+                  maximum: 0
+                  description: RSSI in dBm. Closer to 0 is better.
+                ssid:
+                  type: string
+                  description: SSID the device is currently associated with.
+
+    DeviceEventError:
+      allOf:
+        - $ref: "#/components/schemas/DeviceEventBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { const: error }
+            payload:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  description: Short, snake_case error tag (e.g. `audio_not_in_sync`, `decoder_failed`).
+                details:
+                  type: object
+                  additionalProperties: true
 
     Audio:
       type: object
@@ -1037,3 +1562,65 @@ components:
         notes:
           type: string
           description: Optional human-readable release notes.
+
+    WebhookEnvelopeBase:
+      type: object
+      required: [id, type, occurredAt, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Logical event id. Distinct from `Hush-Webhook-Id`: the header
+            changes on every retry, while this one stays stable so consumers
+            can deduplicate cross-retry.
+        type:
+          type: string
+          description: Event type. Always mirrors the `Hush-Webhook-Type` header.
+        occurredAt:
+          type: string
+          format: date-time
+          description: When the event happened on the server (UTC, with `Z` suffix).
+
+    WebhookEnvelopeDeviceOnline:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required: [type, data]
+          properties:
+            type: { const: device.online }
+            data:
+              $ref: "#/components/schemas/WebhookDeviceOnlineData"
+
+    WebhookDeviceOnlineData:
+      type: object
+      required: [device, previouslyOfflineSec]
+      properties:
+        device: { $ref: "#/components/schemas/Device" }
+        previouslyOfflineSec:
+          type: integer
+          minimum: 300
+          description: |
+            How long the device was silent before this transition. Always at
+            least 300 (5 minutes — the threshold that defines "back online").
+
+    WebhookEnvelopeAudioFinalized:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEnvelopeBase"
+        - type: object
+          required: [type, data]
+          properties:
+            type: { const: audio.finalized }
+            data:
+              $ref: "#/components/schemas/WebhookAudioFinalizedData"
+
+    WebhookAudioFinalizedData:
+      type: object
+      required: [audio]
+      properties:
+        audio: { $ref: "#/components/schemas/Audio" }
+        failureReason:
+          type: string
+          description: |
+            Short error tag, present iff `audio.state == failed`. Examples:
+            `transcode_failed`, `unsupported_codec`, `source_missing`.
