@@ -443,6 +443,68 @@ paths:
                 $ref: "#/components/schemas/Device"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: updateDevice
+      tags: [devices]
+      summary: Update a device owned by the authenticated user.
+      description: |
+        Renames a claimed device. Only the user-chosen `name` is mutable; the
+        serial, state and firmware version are owned by the device lifecycle
+        and cannot be changed here. Scoped to the caller: a device owned by
+        another user (or already retired) responds `404`, never `403`, so the
+        endpoint does not leak which device ids exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceUpdateRequest"
+            examples:
+              rename:
+                summary: Give the device a friendly name.
+                value:
+                  name: Marta's box
+              clearName:
+                summary: Clear the name (fall back to the serial in the UI).
+                value:
+                  name: null
+      responses:
+        "200":
+          description: Updated device.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+              examples:
+                renamed:
+                  summary: Device after a successful rename.
+                  value:
+                    id: 7c0d976d-e8cc-42c5-ad04-bf150200e7fd
+                    serial: DEV001
+                    ownerId: 25e4c34b-8d6b-4684-a300-781a3fa39ae1
+                    name: Marta's box
+                    state: claimed
+                    firmwareVersion: 1.4.2
+                    lastSeenAt: 2026-06-15T09:30:00Z
+                    createdAt: 2026-06-01T12:00:00Z
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      operationId: retireDevice
+      tags: [devices]
+      summary: Retire (remove) a device owned by the authenticated user.
+      description: |
+        Soft-deletes the device: it transitions to `retired`, stops syncing
+        and disappears from the owner's device list. Ownership is preserved so
+        the action can be reversed by support — the hardware identity and its
+        secret survive, the unit is never destroyed. Scoped to the caller: a
+        device owned by another user (or already retired) responds `404`.
+      responses:
+        "204":
+          description: Device retired.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/devices/{id}/claim:
     parameters:
@@ -1166,6 +1228,18 @@ components:
           type: string
         name:
           type: string
+
+    DeviceUpdateRequest:
+      type: object
+      description: |
+        Mutable device fields. Only the user-chosen name can be changed;
+        serial, state and firmware are managed by the device lifecycle.
+      additionalProperties: false
+      properties:
+        name:
+          type: [string, "null"]
+          maxLength: 120
+          description: New device name. Send null to clear it.
 
     DeviceSyncResponse:
       type: object
