@@ -602,6 +602,20 @@ paths:
                 $ref: "#/components/schemas/Audio"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteAudio
+      tags: [audio]
+      summary: Delete an audio item.
+      description: |
+        Permanently removes the audio metadata and its stored objects (the raw
+        upload and the transcoded MP3). Any card bindings that reference this
+        audio are removed as well (cascade). Only the owner may delete their
+        own audio; deleting another user's audio returns `404`.
+      responses:
+        "204":
+          description: Audio deleted.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/audio/{id}/finalize:
     parameters:
