@@ -29,9 +29,9 @@ info:
     Clients **must** honour `Retry-After`; exponential back-off is encouraged
     but the floor is whatever the server asks for.
 
-    Limits are per IP for unauthenticated routes (`/v1/users/{login,refresh}`),
+    Limits are per IP for unauthenticated routes (`/v1/users/{register,login,refresh}`),
     per device for `/v1/device/*` and `/v1/firmware/*`, and per user for all
-    other authenticated routes (including `/v1/users/register`). Concrete values are operational and may
+    other authenticated routes. Concrete values are operational and may
     change without a spec bump — read them from the headers, do not hard-code.
 
     ## Webhook delivery
@@ -247,12 +247,21 @@ paths:
     post:
       operationId: registerUser
       tags: [users]
-      summary: Create a new user account.
+      summary: Register a new end-user account.
+      security: []
       description: |
-        Registration is not public: it requires a valid user access token. On a
-        fresh install the backend seeds the first account at boot (see
-        `BOOTSTRAP_ADMIN_*`), and that account creates any further users from
-        the dashboard. There are no roles — every user may create others.
+        Public self-registration for end users. Anyone may create an account
+        and is logged straight in: the response carries the same access/refresh
+        token pair as `/v1/users/login` (the refresh token is also set as an
+        `httpOnly` cookie).
+
+        The new account always has the non-privileged `user` role — the role is
+        never read from the request and self-registration can never create an
+        `admin`. Admin accounts are seeded at boot only (see `BOOTSTRAP_ADMIN_*`).
+
+        Operators who want an invite-only deployment set
+        `DISABLE_PUBLIC_REGISTRATION=true`, which makes this endpoint return
+        `403 registration_disabled`.
       requestBody:
         required: true
         content:
@@ -262,14 +271,23 @@ paths:
       responses:
         "201":
           description: |
-            User created. Returns the new user's profile — not tokens: the
-            caller stays authenticated as themselves. The new user signs in via
-            `/v1/users/login` with the password set here.
+            Account created and signed in. Returns an access/refresh token pair;
+            the refresh token is also set as an `httpOnly` cookie.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/User"
-        "401": { $ref: "#/components/responses/Unauthorized" }
+                $ref: "#/components/schemas/AuthTokens"
+        "403":
+          description: Public registration is disabled on this deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                registrationDisabled:
+                  summary: Self-registration is turned off.
+                  value:
+                    code: registration_disabled
+                    message: public registration is disabled
         "409":
           description: Email already in use.
           content:
@@ -1036,7 +1054,7 @@ components:
 
     User:
       type: object
-      required: [id, email, createdAt]
+      required: [id, email, role, createdAt]
       properties:
         id:
           type: string
@@ -1046,6 +1064,13 @@ components:
           format: email
         displayName:
           type: string
+        role:
+          type: string
+          enum: [admin, user]
+          description: |
+            Authorization role. `user` is an ordinary end-user scoped to their
+            own resources; `admin` has global privileges. Self-registration
+            always yields `user`.
         createdAt:
           type: string
           format: date-time
