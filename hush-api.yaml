@@ -247,21 +247,19 @@ paths:
     post:
       operationId: registerUser
       tags: [users]
-      summary: Register a new end-user account.
-      security: []
+      summary: Create a new end-user account (admin only).
       description: |
-        Public self-registration for end users. Anyone may create an account
-        and is logged straight in: the response carries the same access/refresh
-        token pair as `/v1/users/login` (the refresh token is also set as an
-        `httpOnly` cookie).
+        Admin-only account creation. The caller must present a valid `admin`
+        bearer token; the new account is **not** logged in and no tokens are
+        issued — the response is the created user's profile. The caller's own
+        session is unaffected.
+
+        There is no public self-registration. An unauthenticated request gets
+        `401`; an authenticated non-admin gets `403`.
 
         The new account always has the non-privileged `user` role — the role is
-        never read from the request and self-registration can never create an
-        `admin`. Admin accounts are seeded at boot only (see `BOOTSTRAP_ADMIN_*`).
-
-        Operators who want an invite-only deployment set
-        `DISABLE_PUBLIC_REGISTRATION=true`, which makes this endpoint return
-        `403 registration_disabled`.
+        never read from the request, so this endpoint can never mint an `admin`.
+        Admin accounts are seeded at boot only (see `BOOTSTRAP_ADMIN_*`).
       requestBody:
         required: true
         content:
@@ -271,23 +269,33 @@ paths:
       responses:
         "201":
           description: |
-            Account created and signed in. Returns an access/refresh token pair;
-            the refresh token is also set as an `httpOnly` cookie.
+            Account created. Returns the new user's profile; no tokens are
+            issued and the new account is not logged in.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthTokens"
+                $ref: "#/components/schemas/User"
+              examples:
+                created:
+                  summary: The newly created user's profile.
+                  value:
+                    id: 8f1b6a2e-3c4d-4e5f-9a0b-1c2d3e4f5a6b
+                    email: marta@example.com
+                    displayName: Marta
+                    role: user
+                    createdAt: "2026-06-15T09:34:54Z"
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
-          description: Public registration is disabled on this deployment.
+          description: The caller is authenticated but is not an admin.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
               examples:
-                registrationDisabled:
-                  summary: Self-registration is turned off.
+                forbidden:
+                  summary: A non-admin user tried to create an account.
                   value:
-                    code: registration_disabled
-                    message: public registration is disabled
+                    code: forbidden
+                    message: Admin privileges are required to create users.
         "409":
           description: Email already in use.
           content:
