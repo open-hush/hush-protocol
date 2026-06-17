@@ -243,6 +243,57 @@ paths:
         "422": { $ref: "#/components/responses/Unprocessable" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /v1/users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List user accounts (admin only).
+      description: |
+        Admin-only directory of every account. The caller must present a valid
+        `admin` bearer token; an unauthenticated request gets `401` and an
+        authenticated non-admin gets `403`.
+
+        Results are ordered newest-first and paginated by opaque cursor: pass
+        the previous response's `nextCursor` back as the `cursor` query param to
+        fetch the next page. A response without `nextCursor` is the last page.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of user accounts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+              examples:
+                page:
+                  summary: First page of the user directory.
+                  value:
+                    items:
+                      - id: 8f1b6a2e-3c4d-4e5f-9a0b-1c2d3e4f5a6b
+                        email: marta@example.com
+                        displayName: Marta
+                        role: user
+                        createdAt: "2026-06-15T09:34:54Z"
+                      - id: 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+                        email: admin@example.com
+                        displayName: Root Admin
+                        role: admin
+                        createdAt: "2026-06-01T08:00:00Z"
+                    nextCursor: eyJjcmVhdGVkQXQiOiIyMDI2LTA2LTAxVDA4OjAwOjAwWiIsImlkIjoiMWEyYjNjNGQifQ
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The caller is authenticated but is not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                forbidden:
+                  summary: A non-admin user tried to list accounts.
+                  value:
+                    code: forbidden
+                    message: Admin privileges are required to list users.
+
   /v1/users/register:
     post:
       operationId: registerUser
@@ -257,15 +308,30 @@ paths:
         There is no public self-registration. An unauthenticated request gets
         `401`; an authenticated non-admin gets `403`.
 
-        The new account always has the non-privileged `user` role — the role is
-        never read from the request, so this endpoint can never mint an `admin`.
-        Admin accounts are seeded at boot only (see `BOOTSTRAP_ADMIN_*`).
+        The optional `role` field lets an admin choose the new account's role
+        (`admin` or `user`). When omitted it defaults to `user`. This is the
+        only path to mint an `admin` from the dashboard; the bootstrap seed
+        (`BOOTSTRAP_ADMIN_*`) remains for first-boot provisioning.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/UserRegisterRequest"
+            examples:
+              endUser:
+                summary: Create an ordinary end-user (role defaults to user).
+                value:
+                  email: marta@example.com
+                  password: a-much-longer-passphrase
+                  displayName: Marta
+              admin:
+                summary: Create another admin.
+                value:
+                  email: ops@example.com
+                  password: another-long-passphrase
+                  displayName: Ops
+                  role: admin
       responses:
         "201":
           description: |
@@ -1112,6 +1178,14 @@ components:
           minLength: 12
         displayName:
           type: string
+        role:
+          type: string
+          enum: [admin, user]
+          default: user
+          description: |
+            Role for the new account. Optional; defaults to `user` when omitted.
+            Only an admin caller can reach this endpoint, so this is the path to
+            create another `admin` from the dashboard.
 
     UserLoginRequest:
       type: object
@@ -1153,11 +1227,21 @@ components:
           enum: [admin, user]
           description: |
             Authorization role. `user` is an ordinary end-user scoped to their
-            own resources; `admin` has global privileges. Self-registration
-            always yields `user`.
+            own resources; `admin` has global privileges. New accounts default
+            to `user` unless an admin explicitly creates an `admin`.
         createdAt:
           type: string
           format: date-time
+
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/User" }
+        nextCursor:
+          type: string
 
     Device:
       type: object
