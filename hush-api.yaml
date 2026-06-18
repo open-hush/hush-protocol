@@ -199,8 +199,16 @@ paths:
         the dashboard). The response is the **complete current state**: cards,
         audio items with presigned URLs, power-saving thresholds and feature
         flags. Clients diff against their cached version.
+
+        Two callers are accepted:
+        - A **physical device** authenticating with `deviceHmac`; the device is
+          resolved from the HMAC `keyId`.
+        - A **user app acting as a device** authenticating with `userJwt`. In
+          this case `device_id` is **required** and must reference a claimed
+          device owned by the caller.
       security:
         - deviceHmac: []
+        - userJwt: []
       parameters:
         - name: since
           in: query
@@ -209,6 +217,16 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: device_id
+          in: query
+          required: false
+          description: |
+            Target device UUID. Ignored for `deviceHmac` callers (the device is
+            taken from the signature). **Required** for `userJwt` callers and
+            must reference a claimed device owned by the caller.
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: Current sync payload.
@@ -218,7 +236,9 @@ paths:
                 $ref: "#/components/schemas/DeviceSyncResponse"
         "304":
           description: Nothing changed since `since`.
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /v1/device/events:
     post:
@@ -228,8 +248,27 @@ paths:
       description: |
         Devices buffer events (card scans, button presses, errors) locally and
         flush them in batches. The endpoint is idempotent on `eventId`.
+
+        Two callers are accepted:
+        - A **physical device** authenticating with `deviceHmac`; the device is
+          resolved from the HMAC `keyId`.
+        - A **user app acting as a device** authenticating with `userJwt`. In
+          this case `device_id` is **required** and must reference a claimed
+          device owned by the caller.
       security:
         - deviceHmac: []
+        - userJwt: []
+      parameters:
+        - name: device_id
+          in: query
+          required: false
+          description: |
+            Target device UUID. Ignored for `deviceHmac` callers (the device is
+            taken from the signature). **Required** for `userJwt` callers and
+            must reference a claimed device owned by the caller.
+          schema:
+            type: string
+            format: uuid
       requestBody:
         required: true
         content:
@@ -239,7 +278,9 @@ paths:
       responses:
         "202":
           description: Events accepted for processing.
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Unprocessable" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
@@ -1022,6 +1063,30 @@ components:
               value:
                 code: expired_token
                 message: Access token has expired; refresh required.
+    BadRequest:
+      description: The request is malformed or missing a required parameter.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            missingDeviceId:
+              summary: A `userJwt` caller omitted the required `device_id`.
+              value:
+                code: device_id_required
+                message: device_id query parameter is required when authenticating as a user.
+                details:
+                  field: device_id
+    Forbidden:
+      description: Authenticated, but not allowed to act on this resource.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            deviceForbidden:
+              summary: The device is not a claimed device owned by the caller.
+              value:
+                code: device_forbidden
+                message: The requested device is not accessible to this user.
     NotFound:
       description: Resource not found.
       content:
