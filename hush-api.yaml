@@ -238,7 +238,7 @@ paths:
           description: Nothing changed since `since`.
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/device/events:
     post:
@@ -280,7 +280,7 @@ paths:
           description: Events accepted for processing.
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/Unprocessable" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
@@ -1076,17 +1076,6 @@ components:
                 message: device_id query parameter is required when authenticating as a user.
                 details:
                   field: device_id
-    Forbidden:
-      description: Authenticated, but not allowed to act on this resource.
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/Error" }
-          examples:
-            deviceForbidden:
-              summary: The device is not a claimed device owned by the caller.
-              value:
-                code: device_forbidden
-                message: The requested device is not accessible to this user.
     NotFound:
       description: Resource not found.
       content:
