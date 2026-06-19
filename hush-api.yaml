@@ -91,6 +91,8 @@ tags:
     description: Binding of RFID card UIDs to audio items on a device.
   - name: firmware
     description: Firmware OTA distribution.
+  - name: config
+    description: External service configuration status (read-only, admin).
   - name: webhooks
     description: Server-to-consumer notifications. Defined under top-level `webhooks:`.
 
@@ -882,6 +884,87 @@ paths:
                     message: No firmware has been published for hardware revision r0.
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /v1/config:
+    get:
+      operationId: getConfig
+      tags: [config]
+      summary: External service configuration status (admin only).
+      description: |
+        Read-only status of the external services the backend integrates with:
+        email (Resend), audio object storage (S3 / MinIO / R2), log traces
+        (BetterStack) and crash reporting (Sentry). For each service it reports
+        whether it is configured, the **names** of the environment variables
+        that drive it, and a handful of non-secret resolved hints (region,
+        bucket, masked endpoint, …).
+
+        Configuration is operator-owned: values live in the backend's
+        environment (`.env`) and are read at process start. This endpoint
+        **never** returns a secret value — only whether each variable is set.
+        To change a value, edit the environment and restart the backend.
+
+        Admin-only: an unauthenticated request gets `401` and an authenticated
+        non-admin gets `403`.
+      responses:
+        "200":
+          description: Per-service configuration status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigStatus"
+              examples:
+                mixed:
+                  summary: Storage configured, the other services pending.
+                  value:
+                    services:
+                      - service: email
+                        label: Email (Resend)
+                        configured: false
+                        variables:
+                          - { name: RESEND_API_KEY, set: false, secret: true, required: true }
+                          - { name: RESEND_FROM, set: false, secret: false, required: true }
+                        hints: {}
+                      - service: storage
+                        label: Audio storage (S3 / MinIO / R2)
+                        configured: true
+                        variables:
+                          - { name: S3_ENDPOINT, set: true, secret: false, required: true }
+                          - { name: S3_REGION, set: true, secret: false, required: false }
+                          - { name: S3_BUCKET, set: true, secret: false, required: true }
+                          - { name: S3_ACCESS_KEY, set: true, secret: true, required: true }
+                          - { name: S3_SECRET_KEY, set: true, secret: true, required: true }
+                          - { name: S3_USE_PATH_STYLE, set: true, secret: false, required: false }
+                        hints:
+                          region: us-east-1
+                          bucket: hush-audio
+                          endpoint: "http://loc***"
+                          pathStyle: "true"
+                      - service: traces
+                        label: Log traces (BetterStack)
+                        configured: false
+                        variables:
+                          - { name: BETTERSTACK_API_KEY, set: false, secret: true, required: true }
+                          - { name: BETTERSTACK_INGEST_URL, set: false, secret: false, required: false }
+                        hints: {}
+                      - service: crash
+                        label: Crash reporting (Sentry)
+                        configured: false
+                        variables:
+                          - { name: SENTRY_DSN, set: false, secret: true, required: true }
+                          - { name: SENTRY_ENVIRONMENT, set: false, secret: false, required: false }
+                        hints: {}
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The caller is authenticated but is not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                forbidden:
+                  summary: A non-admin user tried to read the service configuration.
+                  value:
+                    code: forbidden
+                    message: Admin privileges are required to read service configuration.
+
 webhooks:
   deviceOnline:
     post:
@@ -1182,6 +1265,61 @@ components:
         error:
           type: string
           description: Short failure description. Present when `status` is not `ok`.
+
+    ConfigStatus:
+      type: object
+      required: [services]
+      properties:
+        services:
+          type: array
+          description: One entry per external service the backend integrates with.
+          items:
+            $ref: "#/components/schemas/ServiceConfig"
+
+    ServiceConfig:
+      type: object
+      required: [service, label, configured, variables]
+      properties:
+        service:
+          type: string
+          enum: [email, storage, traces, crash]
+          description: Stable machine key for the service.
+        label:
+          type: string
+          description: Human-readable service name for the dashboard.
+        configured:
+          type: boolean
+          description: True when every `required` variable of this service is set.
+        variables:
+          type: array
+          description: Environment variables that drive this service.
+          items:
+            $ref: "#/components/schemas/ConfigVariable"
+        hints:
+          type: object
+          description: |
+            Non-secret resolved values that help an operator confirm which
+            environment is loaded (region, bucket, masked endpoint, …). Never
+            contains a secret value.
+          additionalProperties:
+            type: string
+
+    ConfigVariable:
+      type: object
+      required: [name, set, secret, required]
+      properties:
+        name:
+          type: string
+          description: Environment variable name, e.g. `RESEND_API_KEY`.
+        set:
+          type: boolean
+          description: Whether the variable is present and non-empty. The value itself is never returned.
+        secret:
+          type: boolean
+          description: Whether the value is sensitive. Secret values are never exposed, set or not.
+        required:
+          type: boolean
+          description: Whether this variable counts toward the service's `configured` flag.
 
     Error:
       type: object
