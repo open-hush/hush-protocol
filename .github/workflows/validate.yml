@@ -16,9 +16,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Lint the spec
-        run: npx --yes @redocly/cli@latest lint hush-api.yaml
+        run: pnpm run lint
 
   build-docs:
     name: build static docs
@@ -30,9 +34,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Build static HTML
-        run: npx --yes @redocly/cli@latest build-docs hush-api.yaml -o site/index.html
+        run: pnpm run build-docs
 
       - name: Upload site as artifact
         uses: actions/upload-artifact@v4
