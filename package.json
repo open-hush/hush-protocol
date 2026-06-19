@@ -1,0 +1,19 @@
+{
+  "name": "hush-protocol",
+  "version": "1.0.0",
+  "description": "Hush OpenAPI 3.1 specification",
+  "private": true,
+  "scripts": {
+    "lint": "redocly lint hush-api.yaml",
+    "preview-docs": "redocly preview-docs hush-api.yaml",
+    "build-docs": "redocly build-docs hush-api.yaml -o site/index.html"
+  },
+  "devDependencies": {
+    "@redocly/cli": "2.34.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.12.3"
+}

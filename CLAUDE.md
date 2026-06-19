@@ -30,19 +30,16 @@ Public endpoints (e.g. `/v1/health`, `/v1/auth/login`) declare empty `security: 
 
 ```bash
 # Validate spec — must pass before commit
-npx @redocly/cli lint hush-api.yaml
+pnpm run lint
 
 # Preview docs locally with live reload
-npx @redocly/cli preview-docs hush-api.yaml
+pnpm run preview-docs
 
 # Build static HTML for GitHub Pages
-npx @redocly/cli build-docs hush-api.yaml -o site/index.html
-
-# Diff a working copy vs. main (useful before opening cross-repo PRs)
-npx @redocly/cli diff main:hush-api.yaml hush-api.yaml
+pnpm run build-docs
 ```
 
-CI runs `redocly lint` on every PR; do not push if local lint fails.
+CI runs `pnpm run lint` on every PR; do not push if local lint fails.
 
 ## Cross-repo workflow
 
