@@ -168,18 +168,43 @@ paths:
       tags: [device]
       summary: First-boot registration of a device.
       description: |
-        Called once by the firmware right after WiFi credentials have been
-        provisioned via BLE. The device proves possession of its baked-in
-        per-device secret via HMAC and receives a device-scoped token plus
-        the initial sync payload.
+        Registers a new device and returns it in the `unclaimed` state together
+        with a `claimCode` the user enters to claim it.
+
+        Two callers are accepted:
+        - A **physical device** authenticating with `deviceHmac`. Called once by
+          the firmware right after WiFi credentials have been provisioned via
+          BLE; the device proves possession of its baked-in per-device secret via
+          HMAC. The `virtual` field is ignored and treated as `false`.
+        - A **user app acting as a virtual device** authenticating with
+          `userJwt`. The app sends `virtual: true` to register itself as a
+          software-only device for the authenticated user.
+
+        Idempotent on `serial`: re-registering an existing device returns the
+        current record. `claimCode` is present only while the device is
+        `unclaimed`.
       security:
         - deviceHmac: []
+        - userJwt: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/DeviceRegisterRequest"
+            examples:
+              physical:
+                summary: Physical device registering via deviceHmac.
+                value:
+                  serial: HSH-2A4F9C1E
+                  firmwareVersion: 1.4.2
+                  macAddress: "a1:b2:c3:d4:e5:f6"
+              virtual:
+                summary: User app registering a virtual device via userJwt.
+                value:
+                  serial: VIRT-8f1b6a2e3c4d
+                  firmwareVersion: app-2.0.0
+                  virtual: true
       responses:
         "200":
           description: Device registered (idempotent).
@@ -187,6 +212,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeviceRegisterResponse"
+              examples:
+                physical:
+                  summary: Newly registered physical device, awaiting claim.
+                  value:
+                    device:
+                      id: 7c0d976d-e8cc-42c5-ad04-bf150200e7fd
+                      serial: HSH-2A4F9C1E
+                      state: unclaimed
+                      firmwareVersion: 1.4.2
+                      createdAt: "2026-06-23T10:48:03Z"
+                    claimCode: "428913"
+                virtual:
+                  summary: Newly registered virtual device, awaiting claim.
+                  value:
+                    device:
+                      id: 9031492b-854a-4e32-97d7-b2c7ee9324ac
+                      serial: VIRT-8f1b6a2e3c4d
+                      state: unclaimed
+                      firmwareVersion: app-2.0.0
+                      createdAt: "2026-06-23T10:48:03Z"
+                    claimCode: "771204"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "422": { $ref: "#/components/responses/Unprocessable" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
@@ -1486,6 +1532,12 @@ components:
           type: string
           description: BLE MAC address, lowercase hex with colons.
           pattern: "^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
+        virtual:
+          type: boolean
+          default: false
+          description: |
+            Whether this is a software-only device registered by a user app via
+            `userJwt`. Ignored (treated as `false`) for `deviceHmac` callers.
 
     DeviceRegisterResponse:
       type: object
@@ -1494,7 +1546,9 @@ components:
         device: { $ref: "#/components/schemas/Device" }
         claimCode:
           type: string
-          description: Short-lived code shown to the user during pairing.
+          description: |
+            Short-lived code shown to the user during pairing. Present only while
+            `device.state` is `unclaimed`; omitted once the device is claimed.
 
     DeviceClaimRequest:
       type: object
