@@ -332,6 +332,97 @@ paths:
         "422": { $ref: "#/components/responses/Unprocessable" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /v1/device/cards/{uid}/download:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        description: RFID UID in lowercase hex (no separators).
+        schema:
+          type: string
+          pattern: "^[0-9a-f]{8,20}$"
+    get:
+      operationId: getCardDownload
+      tags: [cards]
+      summary: On-demand presigned download link for the audio bound to a card.
+      description: |
+        Resolves a scanned card UID to its bound audio and returns a fresh
+        presigned download link **without** a full `GET /v1/device/sync`. Use
+        this to refresh an expired URL: a device waking from deep sleep can
+        re-presign a single track instead of re-presigning the whole library.
+
+        Two callers are accepted (same model as `GET /v1/device/sync`):
+        - A **physical device** authenticating with `deviceHmac`; the device is
+          resolved from the HMAC `keyId`.
+        - A **user app acting as a device** authenticating with `userJwt`. In
+          this case `device_id` is **required** and must reference a claimed
+          device owned by the caller.
+
+        The bound audio must be `ready`; otherwise the call returns `409`.
+      security:
+        - deviceHmac: []
+        - userJwt: []
+      parameters:
+        - name: device_id
+          in: query
+          required: false
+          description: |
+            Target device UUID. Ignored for `deviceHmac` callers (the device is
+            taken from the signature). **Required** for `userJwt` callers and
+            must reference a claimed device owned by the caller.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Presigned download link for the bound audio.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CardDownload"
+              examples:
+                ready:
+                  summary: Card bound to a ready audio item.
+                  value:
+                    audioId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+                    downloadUrl: https://storage.hush.example/audio/7c9e6679.mp3?X-Amz-Expires=1800&X-Amz-Signature=...
+                    sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                    sizeBytes: 2483712
+                    expiresAt: 2026-06-28T12:30:00Z
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: |
+            No binding for the given UID on the target device, or the device is
+            unknown to the authenticated user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                cardNotBound:
+                  summary: UID is not bound on this device.
+                  value:
+                    code: card_not_bound
+                    message: No audio is bound to that card UID on this device.
+                device:
+                  summary: Device unknown to the authenticated user.
+                  value:
+                    code: device_not_found
+                    message: No device with that id is visible to this user.
+        "409":
+          description: The bound audio is not ready for download.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                notReady:
+                  summary: Bound audio is still uploading, processing or failed.
+                  value:
+                    code: audio_not_ready
+                    message: The bound audio is not ready for download yet.
+                    details:
+                      state: processing
+
   /v1/users:
     get:
       operationId: listUsers
@@ -1994,6 +2085,28 @@ components:
           type: string
           format: uri
           description: Presigned GET URL valid until `expiresAt`.
+        expiresAt:
+          type: string
+          format: date-time
+
+    CardDownload:
+      type: object
+      description: |
+        On-demand presigned download link for the audio bound to a single card.
+        Mirrors a single `AudioSyncEntry` resolved by card UID.
+      required: [audioId, downloadUrl, sha256, expiresAt]
+      properties:
+        audioId:
+          type: string
+          format: uuid
+        downloadUrl:
+          type: string
+          format: uri
+          description: Presigned GET URL valid until `expiresAt`.
+        sha256:
+          type: string
+        sizeBytes:
+          type: integer
         expiresAt:
           type: string
           format: date-time
