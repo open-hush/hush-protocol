@@ -661,6 +661,67 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/devices/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    get:
+      operationId: listDeviceEvents
+      tags: [devices]
+      summary: List events recorded for a device.
+      description: |
+        Returns the events the device has pushed via `POST /v1/device/events`
+        (card scans, button presses, errors). The mobile app uses it with
+        `type=card_unknown` to build the "cards to bind" list.
+
+        Scoped to the caller: a device owned by another user (or unknown)
+        responds `404`, never `403`, so the endpoint does not leak which device
+        ids exist. Results are ordered newest-first by `ts` and paginated by
+        opaque cursor — pass the previous response's `nextCursor` back as the
+        `cursor` query param. A response without `nextCursor` is the last page.
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          required: false
+          description: |
+            Filter to a single event type (e.g. `card_unknown`). When omitted,
+            every event type is returned.
+          schema:
+            type: string
+            enum:
+              - card_scanned
+              - card_unknown
+              - playback_started
+              - playback_finished
+              - button_pressed
+              - low_battery
+              - error
+      responses:
+        "200":
+          description: A page of device events, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceEventList"
+              examples:
+                cardUnknown:
+                  summary: Unknown-card events awaiting binding.
+                  value:
+                    items:
+                      - eventId: 9f86d081-884c-7d65-9a2f-eaa0c55ad015
+                        ts: "2026-06-28T09:30:00Z"
+                        type: card_unknown
+                        payload:
+                          uid: "04a1b2c3d4e5"
+                      - eventId: 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d
+                        ts: "2026-06-28T09:12:00Z"
+                        type: card_unknown
+                        payload:
+                          uid: "04ffeeddccbb"
+                    nextCursor: eyJjcmVhdGVkQXQiOiIyMDI2LTA2LTI4VDA5OjEyOjAwWiIsImlkIjoiMWEyYjNjNGQifQ
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/devices/{id}/claim:
     parameters:
       - $ref: "#/components/parameters/DeviceId"
@@ -1618,6 +1679,16 @@ components:
           minItems: 1
           maxItems: 200
           items: { $ref: "#/components/schemas/DeviceEvent" }
+
+    DeviceEventList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceEvent" }
+        nextCursor:
+          type: string
 
     DeviceEvent:
       description: |
